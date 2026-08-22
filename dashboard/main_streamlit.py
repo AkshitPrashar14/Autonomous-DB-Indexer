@@ -15,8 +15,8 @@ from app.ai.candidate_gen import CandidateGenerator
 from app.ai.context_builder import ContextBuilder
 from app.evaluation.safety_gate import SafetyGate
 from app.evaluation.reward_calculator import RewardCalculator
-from app.agent.features import FeatureExtractor
-from app.agent.bandit import BanditPolicy
+from app.bandit.features import FeatureExtractor
+from app.bandit.linucb import LinUCBPolicy as BanditPolicy
 from app.database.schema import SchemaInspector, TableSchema, ColumnSchema
 
 # Optional DB

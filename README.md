@@ -104,8 +104,6 @@ See [docs/BANDIT_SPEC.md](docs/BANDIT_SPEC.md).
 | [FAILURE_LOG.md](docs/FAILURE_LOG.md) | Known failure modes + recovery |
 | [DEMO_PLAN.md](docs/DEMO_PLAN.md) | Hackathon demo script |
 | [FINAL_DEMO.md](docs/FINAL_DEMO.md) | Final architecture, demo, and justification |
-| [AWS_DEPLOYMENT_ROADMAP.md](docs/AWS_DEPLOYMENT_ROADMAP.md) | Free-Tier AWS deployment architecture |
-| [AWS_DEPLOYMENT_CHECKLIST.md](docs/AWS_DEPLOYMENT_CHECKLIST.md) | AWS rollout checklist |
 
 ---
 

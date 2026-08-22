@@ -49,11 +49,12 @@ AI cannot be trusted implicitly with production access. The SafetyGate ensures n
 - **Safety Gate**: Rejected (Exceeds maximum write regression limit).
 - **Result**: Production remains untouched and safe.
 
-## 11. AWS Deployment Architecture
-Designed for the Free Tier:
-- **Laptop (Developer)**: Runs Ollama/Qwen locally (to avoid EC2 RAM exhaustion).
-- **AWS EC2 (t2/t3.micro)**: Hosts the DBAutonomy FastAPI backend, Worker, Dashboard, Redis, and Shadow PostgreSQL database.
-- **AWS RDS (db.t3.micro)**: Hosts the Primary PostgreSQL database.
+## 11. Streamlit Hosted Deployment Architecture
+Designed for the Free Tier and public accessibility:
+- **Streamlit Community Cloud**: Hosts the DBAutonomy dashboard in a hosted demo mode.
+- **Local Fallback**: The deterministic parser replaces the local Ollama/Qwen model in the hosted environment.
+- **Gemini API**: Accessed remotely via Streamlit Secrets for candidate generation.
+- **Shadow Environment**: Mocked gracefully in the hosted demo when PostgreSQL is unavailable, with clear UI warnings.
 
 ## 12. Limitations
 - Synthetic data generation in the shadow database assumes a uniform/random distribution which may not exactly match the data skew of production data.

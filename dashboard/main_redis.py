@@ -229,7 +229,7 @@ with c2:
         Return ONLY the raw SQL query string. No markdown formatting, no explanations. Just the SQL.
         """
         try:
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             sql = response.text.strip().strip("`").strip()

@@ -1,0 +1,184 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Primary (Demo) PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  db_primary:
+    image: postgres:16-alpine
+    container_name: dbautonomy_primary
+    environment:
+      POSTGRES_DB: ${DB_NAME:-dbautonomy_primary}
+      POSTGRES_USER: ${DB_USER:-dbautonomy}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dbautonomy}
+    ports:
+      - "5440:5432"
+    volumes:
+      - db_primary_data:/var/lib/postgresql/data
+      - ./scripts/sql/init_primary.sql:/docker-entrypoint-initdb.d/01_init.sql
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_stat_statements
+        -c pg_stat_statements.track=all
+        -c log_min_duration_statement=500
+        -c log_destination=stderr
+        -c logging_collector=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dbautonomy} -d ${DB_NAME:-dbautonomy_primary}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Shadow PostgreSQL Database (Experiments Only — never receives real data)
+  # ---------------------------------------------------------------------------
+  db_shadow:
+    image: postgres:16-alpine
+    container_name: dbautonomy_shadow
+    environment:
+      POSTGRES_DB: ${SHADOW_DB_NAME:-dbautonomy_shadow}
+      POSTGRES_USER: ${SHADOW_DB_USER:-dbautonomy}
+      POSTGRES_PASSWORD: ${SHADOW_DB_PASSWORD:-dbautonomy}
+    ports:
+      - "5441:5432"
+    volumes:
+      - db_shadow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SHADOW_DB_USER:-dbautonomy} -d ${SHADOW_DB_NAME:-dbautonomy_shadow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Redis (Queue + Schema Cache + Pub/Sub)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: dbautonomy_redis
+    ports:
+      - "6380:6379"
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Ollama (Local AI — Qwen2.5-Coder 3B)
+  # Starts Ollama server and pulls the model on first boot.
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: dbautonomy_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 8 && ollama pull qwen2.5-coder:3b && wait"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+
+  # ---------------------------------------------------------------------------
+  # DBAutonomy FastAPI Application (HTTP API only)
+  # Does NOT run the worker. See 'worker' service below.
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dbautonomy_app
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db_primary
+      - DB_PORT=5432
+      - SHADOW_DB_HOST=db_shadow
+      - SHADOW_DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db_primary:
+        condition: service_healthy
+      db_shadow:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 8s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # DBAutonomy AgentWorker (Standalone — consumes Redis stream)
+  # Separate from the API process. This is the autonomous agent.
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dbautonomy_worker
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db_primary
+      - DB_PORT=5432
+      - SHADOW_DB_HOST=db_shadow
+      - SHADOW_DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      db_primary:
+        condition: service_healthy
+      db_shadow:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    command: python scripts/run_worker.py
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Streamlit Dashboard
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: dbautonomy_dashboard
+    env_file:
+      - .env
+    environment:
+      - API_BASE_URL=http://app:8000
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "8501:8501"
+    depends_on:
+      app:
+        condition: service_healthy
+    command: streamlit run main.py --server.port 8501 --server.address 0.0.0.0
+
+volumes:
+  db_primary_data:
+  db_shadow_data:
+  ollama_data:

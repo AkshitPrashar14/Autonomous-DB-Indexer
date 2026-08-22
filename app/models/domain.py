@@ -1,0 +1,261 @@
+"""
+DBAutonomy — Domain Models
+
+All Pydantic models and dataclasses used across the system.
+No business logic here. No database-specific types.
+"""
+
+from __future__ import annotations
+
+import enum
+from datetime import datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+import numpy as np
+from pydantic import BaseModel, Field, field_validator
+
+# Type alias for the context vector passed to the bandit
+ContextVector = np.ndarray  # shape (d,), dtype float64
+
+
+# ---------------------------------------------------------------------------
+# Enumerations
+# ---------------------------------------------------------------------------
+
+class IndexType(str, enum.Enum):
+    BTREE = "btree"
+    HASH = "hash"
+    GIN = "gin"
+    GIST = "gist"
+    BRIN = "brin"
+
+
+class QueryType(str, enum.Enum):
+    SELECT = "SELECT"
+    UPDATE = "UPDATE"
+    DELETE = "DELETE"
+    INSERT = "INSERT"
+    UNKNOWN = "UNKNOWN"
+
+
+class JobStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    RETRYING = "retrying"
+
+
+class OptimizationStatus(str, enum.Enum):
+    DEPLOYED = "deployed"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Slow Query Event (from LogMonitor)
+# ---------------------------------------------------------------------------
+
+class SlowQueryEvent(BaseModel):
+    """Raw slow query event emitted by the LogMonitor."""
+    event_id: UUID = Field(default_factory=uuid4)
+    raw_log: str
+    detected_at: datetime = Field(default_factory=datetime.utcnow)
+    source: str = "pg_stat_statements"  # or "log_file"
+    duration_ms: float | None = None
+    table_hint: str | None = None  # quick regex extraction, may be wrong
+
+
+# ---------------------------------------------------------------------------
+# Job (in Redis Queue)
+# ---------------------------------------------------------------------------
+
+class OptimizationJob(BaseModel):
+    """Job as stored in the Redis Stream."""
+    job_id: UUID = Field(default_factory=uuid4)
+    stream_entry_id: str | None = None  # set by JobQueue on enqueue
+    raw_log: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    attempt: int = 0
+    max_attempts: int = 3
+    status: JobStatus = JobStatus.PENDING
+    error_message: str | None = None
+
+    @property
+    def is_retryable(self) -> bool:
+        return self.attempt < self.max_attempts
+
+
+# ---------------------------------------------------------------------------
+# Parsed Query (from LocalLogParser)
+# ---------------------------------------------------------------------------
+
+class ParsedQuery(BaseModel):
+    """Structured query information extracted by LocalLogParser (Qwen)."""
+    sql: str
+    duration_ms: float
+    table_name: str
+    query_type: QueryType = QueryType.UNKNOWN
+    where_columns: list[str] = Field(default_factory=list)
+    join_tables: list[str] = Field(default_factory=list)
+    order_by_columns: list[str] = Field(default_factory=list)
+    bind_parameters: dict[str, Any] = Field(default_factory=dict)
+    parse_source: str = "llm"  # "llm" | "regex_fallback"
+    confidence: float = 1.0  # 0.0 – 1.0, lower for regex fallback
+
+
+# ---------------------------------------------------------------------------
+# Schema Objects
+# ---------------------------------------------------------------------------
+
+class ColumnInfo(BaseModel):
+    name: str
+    data_type: str
+    is_nullable: bool = True
+    is_primary_key: bool = False
+    is_foreign_key: bool = False
+    n_distinct: float | None = None  # from pg_stats
+    null_frac: float | None = None
+
+
+class IndexInfo(BaseModel):
+    name: str
+    index_type: IndexType = IndexType.BTREE
+    columns: list[str]
+    is_unique: bool = False
+    where_clause: str | None = None
+
+
+class TableSchema(BaseModel):
+    table_name: str
+    schema_name: str = "public"
+    row_count: int
+    columns: list[ColumnInfo]
+    existing_indexes: list[IndexInfo]
+    fetched_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Optimization Context (input to CandidateGenerator and BanditPolicy)
+# ---------------------------------------------------------------------------
+
+class OptimizationContext(BaseModel):
+    parsed_query: ParsedQuery
+    schema: TableSchema
+    recent_history: list[OptimizationRecord] = Field(default_factory=list)
+    built_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Index Candidate (from CandidateGenerator)
+# ---------------------------------------------------------------------------
+
+class IndexCandidate(BaseModel):
+    """A proposed index, as generated by Gemini Flash."""
+    candidate_id: UUID = Field(default_factory=uuid4)
+    table_name: str
+    columns: list[str]
+    index_type: IndexType = IndexType.BTREE
+    is_unique: bool = False
+    where_clause: str | None = None  # for partial indexes
+    explanation: str = ""  # Gemini's reasoning — for display only, never trusted
+    gemini_rank: int = 0  # Gemini's ordering, 0 = highest priority
+
+    @property
+    def fingerprint(self) -> str:
+        """Stable identifier for this action in the bandit."""
+        cols = "_".join(sorted(self.columns))
+        return f"{self.table_name}_{cols}_{self.index_type.value}"
+
+    @property
+    def index_name(self) -> str:
+        """Generate a deterministic, auditable index name."""
+        cols = "_".join(self.columns[:3])  # cap at 3 for name length
+        ts = int(datetime.utcnow().timestamp())
+        return f"dbautonomy_{self.table_name}_{cols}_{self.index_type.value}_{ts}"
+
+    @property
+    def create_sql(self) -> str:
+        """Generate the CREATE INDEX SQL string."""
+        cols = ", ".join(self.columns)
+        unique = "UNIQUE " if self.is_unique else ""
+        where = f" WHERE {self.where_clause}" if self.where_clause else ""
+        return (
+            f"CREATE {unique}INDEX CONCURRENTLY IF NOT EXISTS {self.index_name} "
+            f"ON {self.table_name} ({cols}){where};"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Benchmark Result
+# ---------------------------------------------------------------------------
+
+class BenchmarkResult(BaseModel):
+    """Statistics collected by BenchmarkRunner from EXPLAIN ANALYZE."""
+    query_p50_ms: float
+    query_p95_ms: float
+    query_mean_ms: float
+    planning_time_ms: float
+    shared_blks_hit: int
+    shared_blks_read: int
+    write_p50_ms: float = 0.0
+    write_p95_ms: float = 0.0
+    n_iterations: int = 10
+    raw_plans: list[dict] = Field(default_factory=list)  # EXPLAIN JSON output
+
+
+# ---------------------------------------------------------------------------
+# Safety Decision
+# ---------------------------------------------------------------------------
+
+class SafetyDecision(BaseModel):
+    """Output of SafetyGate.evaluate()."""
+    approved: bool
+    reason: str
+    stages_passed: list[str] = Field(default_factory=list)
+    stages_failed: list[str] = Field(default_factory=list)
+    reward: float = 0.0
+    risk_score: float = 0.0  # 0 = safe, 1 = maximum risk
+
+
+# ---------------------------------------------------------------------------
+# Optimization Record (persisted to DB)
+# ---------------------------------------------------------------------------
+
+class OptimizationRecord(BaseModel):
+    """Complete record of one optimization attempt."""
+    record_id: UUID = Field(default_factory=uuid4)
+    job_id: UUID
+    candidate: IndexCandidate
+    baseline: BenchmarkResult
+    experiment: BenchmarkResult
+    reward: float
+    decision: SafetyDecision
+    status: OptimizationStatus
+    deployed_index_name: str | None = None
+    context_vector: list[float] = Field(default_factory=list)  # for analysis
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Bandit State (persisted between restarts)
+# ---------------------------------------------------------------------------
+
+class BanditActionState(BaseModel):
+    """Per-action LinUCB matrices."""
+    fingerprint: str
+    A: list[list[float]]  # d×d matrix, JSON serialized
+    b: list[float]         # d-vector
+    n_observations: int = 0
+
+
+class BanditState(BaseModel):
+    """Full bandit state for persistence."""
+    version: int = 1
+    alpha: float = 1.0
+    d: int = 20
+    actions: dict[str, BanditActionState] = Field(default_factory=dict)
+    total_updates: int = 0
+    saved_at: datetime = Field(default_factory=datetime.utcnow)

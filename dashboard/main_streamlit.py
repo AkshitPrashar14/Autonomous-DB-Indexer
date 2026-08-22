@@ -75,9 +75,12 @@ async def run_pipeline(sql: str):
     st.session_state.active_state = None
     
     settings = get_settings()
-    # Inject API Key from Streamlit Secrets if available
-    if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
-        settings.GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    # Inject API Keys from Streamlit Secrets if available
+    if hasattr(st, "secrets"):
+        if "GEMINI_API_KEY" in st.secrets:
+            settings.GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+        if "GROQ_API_KEY" in st.secrets:
+            settings.GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
     
     # 1. Detect
     emit_event("DETECTED", "Slow query detected", {"raw_log_preview": sql})

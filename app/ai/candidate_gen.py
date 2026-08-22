@@ -137,6 +137,10 @@ class CandidateGenerator:
         last_error: Exception | None = None
 
         for attempt in range(1, self._settings.GEMINI_MAX_RETRIES + 1):
+            if not self._settings.GEMINI_API_KEY:
+                last_error = ValueError("GEMINI_API_KEY is not set.")
+                break # Jump straight to Groq fallback
+                
             try:
                 # Gemini SDK is synchronous; run in executor to avoid blocking
                 loop = asyncio.get_event_loop()
@@ -167,7 +171,7 @@ class CandidateGenerator:
                     base_url="https://api.groq.com/openai/v1",
                 )
                 response = await client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
+                    model="llama-3.1-70b-versatile",
                     messages=[
                         {"role": "system", "content": CANDIDATE_GEN_SYSTEM_V1},
                         {"role": "user", "content": prompt}
